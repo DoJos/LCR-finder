@@ -11,6 +11,7 @@ project (LCR_finder CXX)
 # Search for zlib as a dependency for SeqAn.
 find_package (ZLIB)
 
+find_package (OpenMP)
 # Load the SeqAn module and fail if not found.
 find_package (SeqAn REQUIRED)
 

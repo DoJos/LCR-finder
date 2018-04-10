@@ -1,4 +1,5 @@
 #include <iostream>
+#include <fstream>
 #include <chrono>
 #include <utility>
 #include <math.h>
@@ -22,36 +23,17 @@
 #include <seqan/graph_types.h>
 #include <seqan/graph_algorithms.h>
 
+//profiler:
 //valgrind --tool=callgrind ./my_proj ...
 
-
-/*
- * TODOS
- * 
- * ES GIBT EIN SEED EXTENSION ALGORITHMUS IN SEQAN
- * 
- * REPEAT Matrix anpassen
- * 2. kondition zum vertex erstellen einbauen
- *
- * finding longest path ueberpruefen
- * extending longest-path intervals einbauen
- *
- * argumente als parameter übergeben
- *
- *
- *
- * Git fork erstellen
- */
-
-using namespace seqan;
 using namespace std::chrono;
 using namespace std;
+using namespace seqan;
 
 typedef unsigned int TCargo;
 typedef Graph<Directed<TCargo> > TGraph;
 typedef VertexDescriptor<TGraph>::Type TVertexDescriptor;
 typedef Size<TGraph>::Type TSize;
-typedef std::chrono::high_resolution_clock::time_point TimeVar;
 typedef double TScoreValue;
 
 //complexity cutoff value for extending longest path intervals
@@ -62,27 +44,78 @@ double comCut = 3.7491631225622157;
 //alphabet size, 20 AminoAcids, String<AminoAcid> contains 27 letters (wildcards..)
 int const alphSize = 20;
 
-
-//
 //reading the R-NR-Matrices from a file
 Score<TScoreValue, ScoreMatrix<AminoAcid, Default> > readRNRMatrix ( String<char> RNRMatrixPath )
 {
     Score<TScoreValue, ScoreMatrix<AminoAcid, Default> > RNRMatrix;
-    loadScoreMatrix ( RNRMatrix, toCString ( getAbsolutePath ( toCString ( RNRMatrixPath ) ) ) );
+    fstream seqFileIn;
+     //SeqFileIn seqFileIn;
+    seqFileIn.open(toCString ( getAbsolutePath(toCString(RNRMatrixPath))));
+    if (seqFileIn.is_open()) {
+        seqFileIn.close();
+    } else {
+        std::cout << "ERROR: Could not open the RNR Matrices from path: " << toCString(getAbsolutePath(toCString(RNRMatrixPath))) << std::endl;
+        std::cout << "The vertexconstruction will not work properly and will return a different graph!" << std::endl;
+        
+    }
+    
+    /* if ( !open ( seqFileIn, toCString ( getAbsolutePath(toCString(RNRMatrixPath))))) {
+         std::cerr << "ERROR: Could not open the RNR Matrices" << "\n";
+     }*/
+
+    try {
+        loadScoreMatrix ( RNRMatrix, toCString ( getAbsolutePath ( toCString ( RNRMatrixPath ) ) ) );
+
+    } catch ( Exception const & e ) {
+        std::cout << "ERROR: " << e.what() << std::endl;
+    }
+
     return RNRMatrix;
+}
+
+/* initialize the alphabet vector for calculating the frequency of characters in the sliding window
+ * 
+ */
+String<int> initFreqVector () {
+    String<int> alphabetFreq;
+    int N=27;
+    resize (alphabetFreq, N);
+    for (unsigned i = 0; i < N; i++) {
+        alphabetFreq[i] = 0;
+    }
+
+    return alphabetFreq;
+}
+
+/* This is for gba, unneccessary size of the alphabet, do it like initFreqVector (above) but check fastCreateVertices() !!! 
+ * 
+ */
+String<int> initFreqVector2 () {
+    String<int> alphabetFreq;
+    //sized 123 because the last letter 'z' in ASCII is at position 122
+    
+    int N=123;
+    resize (alphabetFreq, N);
+    for (unsigned i = 0; i < N; i++) {
+        alphabetFreq[i] = 0;
+    }
+
+    return alphabetFreq;
 }
 
 
 //GLOBAL MATRICES
-String<char> nonRepeatMatrixPath = "../my_project-build_Kdevelop/combinedMatricesRowByRow095NonRepeat";
-String<char> repeatMatrixPath = "../my_project-build_Kdevelop/combinedMatricesRowByRow095Repeat";
+//TODO ADJUST PATHS
+String<char> nonRepeatMatrixPath = "../LCR-finder/matrices/combinedMatricesRowByRow095NonRepeat";
+String<char> repeatMatrixPath = "../LCR-finder/matrices/combinedMatricesRowByRow095Repeat";
 
 Score<TScoreValue, ScoreMatrix<AminoAcid, Default> > nonRepeatMatrix = readRNRMatrix ( nonRepeatMatrixPath );
 Score<TScoreValue, ScoreMatrix<AminoAcid, Default> > repeatMatrix = readRNRMatrix ( repeatMatrixPath );
 const Blosum62 blosum62Matrix;
 double twoLetterScoringMatrix[676][676] = { {} };
-
-
+double nonNormalizedTwoLetScoMatrix[676][676] = { {} };
+String<int> iniFreqVector = initFreqVector();
+String<int> iniFreqVector2 = initFreqVector2();
 
 
 /* Initiating 2-gram String for any combination of letters in the alphabet
@@ -91,14 +124,14 @@ double twoLetterScoringMatrix[676][676] = { {} };
 StringSet<String<char> > initTwoGramAlphabet() {
     String<char> alphabet;
     StringSet<String<char> > alphabetTwoGram;
-    resize (alphabet, 26);
+    resize (alphabet, 27);
     
     for (unsigned i = 0; i < 26; ++i) {
         alphabet[i] = i + 65;
     }
     
     for (unsigned i = 0; i < 26; ++i) {
-        //are similar letters also a k-gram? if not, change j=0 to j=1;
+        //are similar letters also a k-gram?
         for (unsigned j = 0; j < 26; ++j) {
             String<char> twoGram = alphabet[i];
             appendValue (twoGram, alphabet[j]);
@@ -116,13 +149,13 @@ StringSet<String<char> > initTwoGramAlphabet() {
  */
 template <size_t rows, size_t columns>
 void normalizeScoringMatrix (double (&array)[rows][columns]) {
-    
-    for (unsigned i = 0; i < rows; ++i) {
-        for (unsigned j = 0; j < columns; ++j) {
-            array[i][j] = pow (2, array[i][j]);
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < columns; ++j) {
+            if (array[i][j] != 0) {                
+                array[i][j] = pow (2, array[i][j]);
+            }
         }
     }
-        
         
     double sum = 0;
     
@@ -138,100 +171,8 @@ void normalizeScoringMatrix (double (&array)[rows][columns]) {
     }
     
     return;
-}
-
-
-/* normalize the Blosum62Matrix for primary complexity measure and store it in normalizedScoringMatrix
- * TODO USELESS ?!
- */
-
-/*
-void normalizeMatrixAndCalcSimilarityVec (int rows, int columns, String<int> & wholeSeqFrequencies) {
-    double normalizedScoringMatrix[rows][columns];
-    StringSet<String<char> > TwoGramList = initTwoGramAlphabet();
-
-    for ( unsigned i = 0; i < rows; ++i ) {
-        for ( unsigned j = 0; j < columns; ++j ) {
-            char rowLet = i+65;
-            char colLet = j+65;
-            // why 2^score ?
-            normalizedScoringMatrix[i][j] = pow ( 2, score ( blosum62Matrix, rowLet, colLet ) );
-        }
-    }
-
-
-    // Print calculated normalized Scoring matrix:
-    /*
-    for ( unsigned i = 0; i < rows; ++i ) {
-        for ( unsigned j = 0; j < columns; ++j ) {
-            std:: cout << normalizedScoringMatrix[i][j] << " ";
-        }
-        std::cout << std::endl;
-    }
+}  
     
-
-    //normalize by the sum of each column
-    double sum = 0;
-    for ( unsigned i = 0; i < rows; ++i ) {
-        sum = 0;
-        for ( unsigned j = 0; j < columns; ++j ) {
-            sum = sum + normalizedScoringMatrix[i][j];
-        }
-        for ( unsigned j = 0; j < columns; ++j ) {
-            // why divide by the sum?
-            normalizedScoringMatrix[i][j] = ( normalizedScoringMatrix[i][j] ) /sum;
-        }
-    }
-
-    
-    // Print calculated normalized Scoring matrix:
-
-    for ( unsigned i = 0; i < rows; ++i ) {
-        for ( unsigned j = 0; j < columns; ++j ) {
-            std:: cout << normalizedScoringMatrix[i][j] << " ";
-        }
-        std::cout << std::endl;
-    }
-    
-    
-    //initialize similarity Vector
-    String<double> similarityVector;
-    resize(similarityVector, 123);
-    for (unsigned i = 65; i<91; ++i) {
-        similarityVector[i] = 0.;
-    }
-    
-    //calculate similarityVector
-    for (unsigned i = 65; i < 91; ++i) {
-        for (unsigned j = 65; j < 91; ++j) {
-            similarityVector[i] = similarityVector[i] + normalizedScoringMatrix[i-65][j-65]*wholeSeqFrequencies[j];
-        }
-    }
-  
-    String<double> normalizedSimilarityVector;
-    resize(normalizedSimilarityVector, 123);
-    double sumOfSimilarity = 0;
-    for (unsigned i = 0; i < 26; ++i) {
-        if (wholeSeqFrequencies[i] != 0) {
-            sumOfSimilarity += similarityVector[i+65];
-        }
-    }
-    
-    //TODO sumOfSimilarity is 0 ?
-    std::cout <<"sumOfSimilarity: " << sumOfSimilarity << std::endl;
-    
-    //hier oder im vorherigen schritt: moeglicherweise verfälschung der egbenisse durch AminosaeureGruppen wie B, J, O etc
-    
-    //TODO 
-    for (unsigned i = 0; i < 26; ++i) {
-        normalizedSimilarityVector[i+65] = similarityVector[i+65]/sumOfSimilarity;
-        //std::cout << "normalizedSimilarityVector: " << normalizedSimilarityVector[i+65] << std::endl;
-    }
-    
-    return;
-}
-*/
-
 template <typename T>
 void quickSort (T & arr, int left, int right) {
     int i = left;
@@ -262,23 +203,6 @@ void quickSort (T & arr, int left, int right) {
     if (i < right) {
         quickSort(arr, i, right);
     }
-}
-
-/* Reversing the order of an array or string e.g. GMNK -> KNMG
- * 
- */
-template <typename T>
-void reverseOrder (T & arr) {
-    typename Value<T>::Type tmp = arr[0];
-    int size = length(arr);
-    
-    for (int i = 0, j = size-1; i < size/2; ++i, --j) {
-        tmp = arr[i];
-        arr[i] = arr[j];
-        arr[j] = tmp;
-    }
-    
-    return;
 }
 
 
@@ -322,62 +246,64 @@ void printVertexArray ( TVertexArray const & vertexArray ) {
 }
 
 
-// StringSet<String<int> > & vertexArray, String<AminoAcid> const & seq
-//template <typename TVertexArray, typename TSeq>
 /* create Edges in our Graph with specific conditions
  * cutoff = 1, tTwo = 3, tThree = 5
+ * TODO
  */
-TGraph createEdges ( TGraph myGraph, String<String<int> > & vertexArray, String<AminoAcid> const & seq ) {
+TGraph createEdges ( TGraph gbaGraph, String<String<int> > & vertexArray, String<AminoAcid> const & seq ) {
     int cutoff = 1;
+    //TODO parameter as input
     int tTwo = 3;
     int tThree = 5;
+    int tFour = 15;
+    int lenArr = length(vertexArray);
 
     if ( length ( vertexArray ) <= 1 ) {
-        return myGraph;
+        return gbaGraph;
     }
 
-    //set predecessors
-    int dummyPos = 0;
-    for (int i = 1; i < length(vertexArray); ++i) {
-        addEdge (myGraph, dummyPos, i);
-    }
-    
-
-    for ( int startVertex = 1; startVertex < length ( vertexArray ); ++startVertex ) {
+    for ( int startVertex = 0; startVertex < length ( vertexArray ); ++startVertex ) {
         //std::cout << "STARTVERTEX: " << vertexArray[startVertex][1] << "," << vertexArray[startVertex][2] << std::endl;
         for ( int destinationVertex = startVertex + 1; destinationVertex < length ( vertexArray ); ++destinationVertex ) {
             //std::cout << "DESTINATIONVERTEX: " << vertexArray[destinationVertex][1] << "," << vertexArray[destinationVertex][2] << std::endl;
             std::tuple<char, char> first ( seq[vertexArray[startVertex][1]-1], seq[vertexArray[destinationVertex][1]-1] );
             std::tuple<char, char> second ( seq[vertexArray[startVertex][2]-1], seq[vertexArray[destinationVertex][2]-1] );
-
+            
             if ( score ( blosum62Matrix, std::get<0> ( first ), std::get<0> ( second ) ) > cutoff && score ( blosum62Matrix, std::get<1> ( first ), std::get<1> ( second ) ) > cutoff ) {
-                //std::cout << seq[vertexArray[startVertex][1]] << vertexArray[startVertex][1] << seq[vertexArray[destinationVertex][1]] << vertexArray[destinationVertex][1] << std::endl;
-                //std::cout << seq[vertexArray[startVertex][2]] << vertexArray[startVertex][2] << seq[vertexArray[destinationVertex][2]] << vertexArray[destinationVertex][2] << std::endl;
 
-                // 3 conditions to be checked before creating an edge
+                // 4 conditions to be checked before creating an edge
+                //condition #1:
                 if ( abs ( ( vertexArray[startVertex][2] - vertexArray[startVertex][1] ) - ( vertexArray[destinationVertex][2] - vertexArray[destinationVertex][1] ) ) <= tTwo ) {
-                    if ( vertexArray[startVertex][1] <= vertexArray[destinationVertex][1] && vertexArray[destinationVertex][1] <= vertexArray[startVertex][2] && vertexArray[startVertex][2] <= vertexArray[destinationVertex][2] ) {
-                        if ( vertexArray[startVertex][2] == vertexArray[destinationVertex][1] ) {
-                            if ( vertexArray[startVertex][2]-vertexArray[startVertex][1] <= tThree && vertexArray[destinationVertex][2]-vertexArray[destinationVertex][1] ) {
-                                addEdge ( myGraph, startVertex, destinationVertex );
+                    //condition #2:
+                    if ((vertexArray[destinationVertex][1] - vertexArray[startVertex][1]) <= tFour) {                    
+                    //condition #3:
+                        if ( (vertexArray[startVertex][1] <= vertexArray[destinationVertex][1]) && (vertexArray[destinationVertex][1] <= vertexArray[startVertex][2]) && (vertexArray[startVertex][2] <= vertexArray[destinationVertex][2]) ) {
+                            //condition #4:
+                            if ((vertexArray[startVertex][1] == vertexArray[destinationVertex][1]) || (vertexArray[startVertex][2] == vertexArray[destinationVertex][1]) || (vertexArray[startVertex][2] == vertexArray[destinationVertex][2])) {
+                                if ( ((vertexArray[startVertex][2]-vertexArray[startVertex][1]) <= tThree) && (vertexArray[destinationVertex][2]-vertexArray[destinationVertex][1]) <= tThree ) {
+                                    addEdge ( gbaGraph, startVertex, destinationVertex );
+                                }
+                            } else {
+                                addEdge ( gbaGraph, startVertex, destinationVertex );
                             }
-                        } else {
-                            addEdge ( myGraph, startVertex, destinationVertex );
                         }
                     }
                 }
             }
         }
     }
-
-    drawGraph ( myGraph );
-    return myGraph;
+    //std::cout << "number of edges: " << numEdges(gbaGraph) << std::endl;;
+    //std::cout << "vertexArray: " << std::endl;
+    //for (int i = 0; i < length(vertexArray); ++i) {
+    //    printSeqAnString(vertexArray[i]);
+    //}
+    
+    //drawGraph ( gbaGraph );
+    return gbaGraph;
 }
 
 
-// String<int> & vertex, StringSet<String<int> > & vertexArray, int const counter, int & firstPositionOfTuple, int & secondPositionOfTuple
-//template <typename TVertex, typename TVertexArray>
-void createVertexArray ( String<int> & vertex, String<String<int> > & vertexArray, int const counter, int & firstPositionOfTuple, int & secondPositionOfTuple, String<int> & alphabetFreq ) {
+void createVertexArray ( String<int> & vertex, String<String<int> > & vertexArray, int const counter, int & firstPositionOfTuple, int & secondPositionOfTuple) {
     clear (vertex);
     appendValue (vertex, counter);
     appendValue (vertex, firstPositionOfTuple);
@@ -394,45 +320,23 @@ void createVertexArray ( String<int> & vertex, String<String<int> > & vertexArra
  * 
  */
 template <typename TScoreValue, typename TSequenceValue, typename TSpec>
-bool checkSameWindowByChance ( Score<TScoreValue, ScoreMatrix<TSequenceValue, TSpec> > const & repeatMatrix, Score<TScoreValue, ScoreMatrix<TSequenceValue, TSpec> > const & nonRepeatMatrix, char const & firstLetter, char const & secondLetter, double const & alphabetFreq, int const & winLen ) {
-    double scoreRepeatMatrix = score ( repeatMatrix, firstLetter, secondLetter );
-    double scoreNonRepeatMatrix = score ( nonRepeatMatrix, firstLetter, secondLetter );
+bool checkSameWindowByChance ( Score<TScoreValue, ScoreMatrix<TSequenceValue, TSpec> > const & repeatMatrix, Score<TScoreValue, ScoreMatrix<TSequenceValue, TSpec> > const & nonRepeatMatrix, char const & firstLetter, char const & secondLetter, double const & alphabetFreq, double const & winLen ) {
+    bool construct = false;
+    double scoreRepeatMatrix = score ( repeatMatrix,firstLetter, secondLetter);
+    
+    double scoreNonRepeatMatrix = score ( nonRepeatMatrix, firstLetter, secondLetter);
     double frequency = alphabetFreq/winLen;
 
-    //std::cout << "|"<<scoreRepeatMatrix << "-" << frequency<<"|" << "<="<< "|"  << scoreNonRepeatMatrix << "-" << frequency<< "|" << std::endl;
-    if (abs(scoreRepeatMatrix - (frequency)) <= abs(scoreNonRepeatMatrix - (frequency))) {
-        return true;
+    double calcDiffNR = abs(scoreNonRepeatMatrix - (frequency));
+    double calcDiffR = abs(scoreRepeatMatrix - (frequency));
+    
+    //std::cout << "Score in repeatMatrix: " << scoreRepeatMatrix << " Score nonRepeatMatrix: " << scoreNonRepeatMatrix << " freq: " << frequency << std::endl;
+    
+    if (calcDiffNR >= calcDiffR) {
+        construct = true;
     }
     
-    return false;
-}
-
-
-/* initialize the alphabet vector for calculating the frequency of characters in the sliding window
- * 
- */
-String<int> initFreqVector () {
-    String<int> alphabetFreq;
-    
-    //sized 123 because the last letter 'z' in ASCII is at position 122
-    resize (alphabetFreq, 123);
-    for (unsigned i = 0; i < 123; i++) {
-        alphabetFreq[i] = 0;
-    }
-
-    return alphabetFreq;
-}
-
-
-/* set alphabet frequencies to 0
- * 
- */
-void clearAlphabetFreq(String<int> & alphabetFreq) {
-    for (unsigned i = 65; i < 91; i++) {
-        alphabetFreq[i] = 0;
-    }
-    
-    return;
+    return construct;
 }
 
 /* calculate the frequency of each character in the given sequence
@@ -441,7 +345,8 @@ void clearAlphabetFreq(String<int> & alphabetFreq) {
 void getAminoAcidCountInSequence (String<int> & wholeSeqFrequencies, String<AminoAcid> const & seq) {
     for (unsigned i = 0; i < length(seq); ++i) {
         char letter = seq[i];
-        ++wholeSeqFrequencies[letter];
+        int idx=(int)letter;
+        ++wholeSeqFrequencies[idx-65];
     }
     
     return;
@@ -453,7 +358,7 @@ void getAminoAcidCountInSequence (String<int> & wholeSeqFrequencies, String<Amin
  * 
  */
 template <typename TSeq, typename TVertex, typename TVertexArray>
-TGraph fastCreateVertices ( TSeq const & seq, unsigned const & winLen, unsigned const & maxIndelTandem, unsigned const & maxIndelCryptic, TVertex & vertex, TVertexArray & vertexArray ) {
+TGraph fastCreateVertices ( TSeq const & seq, unsigned const & winLen, unsigned const & maxIndelTandem, unsigned const & maxIndelCryptic, TVertex & vertex, TVertexArray & vertexArray, int const & originalImp ) {
     TGraph gbaGraph;
     int cutoff = 1;
     int counter = 0;
@@ -461,31 +366,31 @@ TGraph fastCreateVertices ( TSeq const & seq, unsigned const & winLen, unsigned 
     int firstDumPos = 0;
     int secDumPos = 0;
     
-    String<int> alphabetFreq = initFreqVector();
+    String<int> alphabetFreq = iniFreqVector2;
 
-    //calc frequencyVector - TODO: there is a calc freqVector function
     for ( int i = 0; i < winLen; ++i ) {
         char currentLetter = seq[i];
-        ++alphabetFreq[currentLetter];
+        ++alphabetFreq[(int)(currentLetter)];
     }
     
-    createVertexArray ( vertex, vertexArray, counter, firstDumPos, secDumPos, alphabetFreq );
+    createVertexArray ( vertex, vertexArray, counter, firstDumPos, secDumPos);
     addVertex(gbaGraph);
     
     ++counter;
     
-    for ( unsigned i = 0; i < winLen; ++i ) {
+    for ( unsigned i = 0; i < winLen-1; ++i ) {
         char firstLetter = seq[i];
         
-        for ( unsigned x = i+1; x < ( winLen ); ++x ) {
+        for ( unsigned x = i+1; x < winLen; ++x ) {
             char secondLetter = seq[x];
 
+            //std::cout << firstLetter << " " << secondLetter << " " <<  score ( blosum62Matrix, firstLetter, secondLetter ) << std::endl;
             if ( score ( blosum62Matrix, firstLetter, secondLetter ) > cutoff ) {
-
-                if ( checkSameWindowByChance ( repeatMatrix, nonRepeatMatrix, firstLetter, secondLetter, alphabetFreq[firstLetter], winLen ) ==true ) {
+                
+                if ( checkSameWindowByChance ( repeatMatrix, nonRepeatMatrix, firstLetter, secondLetter, alphabetFreq[firstLetter], winLen )) {
                     int firstPositionOfTuple = i+1;
                     int secondPositionOfTuple = x+1;
-                    createVertexArray ( vertex, vertexArray, counter, firstPositionOfTuple, secondPositionOfTuple, alphabetFreq );
+                    createVertexArray ( vertex, vertexArray, counter, firstPositionOfTuple, secondPositionOfTuple);
                     addVertex ( gbaGraph );
 
                     ++counter;
@@ -493,7 +398,7 @@ TGraph fastCreateVertices ( TSeq const & seq, unsigned const & winLen, unsigned 
             }
         }
     }
-
+    
     for ( unsigned i = 1; i < ( length ( seq )-winLen ) + 1; ++i ) {
         //for calculating the frequencies of aminoacids in the same window
         char decrementLetter = seq[i-1];
@@ -503,36 +408,53 @@ TGraph fastCreateVertices ( TSeq const & seq, unsigned const & winLen, unsigned 
         ++alphabetFreq[incrementNextLetter];
 
         for ( int x = 0; x < winLen - 1; ++x ) {
-            char firstLetter = seq[i+x];
-            char secondLetter = seq[i+winLen-1];
+
+            //TODO in Kahveci's code, switched secondLetter and firstLetter order?
+            char secondLetter = seq[i+x];
+            char firstLetter = seq[i+winLen-1];
+            if (originalImp==1) {    
+                firstLetter = seq[i+x];
+                secondLetter = seq[i+winLen-1]; 
+            }
+            
 
             if ( score ( blosum62Matrix, firstLetter, secondLetter ) > cutoff ) {
-                if ( checkSameWindowByChance ( repeatMatrix, nonRepeatMatrix, firstLetter, secondLetter, alphabetFreq[firstLetter], winLen ) ==true ) {
+                //std::cout << firstLetter << " " << secondLetter << " " <<  score ( blosum62Matrix, firstLetter, secondLetter ) << std::endl;
+            //TODO in Kahveci's code, switched secondLetter and firstLetter order?
+                if ( checkSameWindowByChance ( repeatMatrix, nonRepeatMatrix, firstLetter, secondLetter, alphabetFreq[firstLetter], winLen )) {
                     int firstPositionOfTuple = i+x+1;
-                    int secondPositionOfTuple = i+winLen-1+1;
-
-                    createVertexArray ( vertex, vertexArray, counter, firstPositionOfTuple, secondPositionOfTuple, alphabetFreq );
+                    int secondPositionOfTuple = i+winLen;
+                    
+                    createVertexArray ( vertex, vertexArray, counter, firstPositionOfTuple, secondPositionOfTuple);
                     addVertex ( gbaGraph );
 
                     ++counter;
+                } else {
+                    //std::cout << "Symbols in window by Chance: " << i+x << " - " << i+winLen-1 << std::endl;
                 }
             }
         }
     }
-
+    
+    //for (int i = 0; i < length(vertexArray); ++i) {
+    //    printSeqAnString(vertexArray[i]);
+    //}
+    //std::cout << "Number of vertices in the graph: " <<numVertices(gbaGraph) << std::endl;
+    
     return gbaGraph;
 }
 
 
-/* Calculate shannon entropy
+/* Calculates shannon entropy
  * 
  */
 long double shanEntropy ( unsigned const & L, String<int> const & aaQuantity ) {
     long double K2KV = 0;
     
-    for ( unsigned i = 65; i < 26+65; ++i ) {    
+    for ( unsigned i = 0; i < 27; ++i ) {    
+        long double conv=(long double)aaQuantity[i]/L;
         if ( aaQuantity[i] != 0 ) {
-            K2KV += -log2((long double)aaQuantity[i] / L ) * ( (long double)aaQuantity[i] / L );
+            K2KV += -log2(conv) * conv;
         }
     }
     
@@ -554,7 +476,7 @@ String<double> initSeqEnt(String<AminoAcid> const & seq) {
     return seqEnt;
 }
 
-/* TODO
+/*
  * 
  */
 int findLow (float const & hiCut, int const & i, int const & limit, String<long double> const & H) {
@@ -571,7 +493,7 @@ int findLow (float const & hiCut, int const & i, int const & limit, String<long 
     return (j+1);
 }
 
-/* TODO
+/*
  * 
  */
 int findHigh (float const & hiCut, int const & i, int const & limit, String<long double> const & H) {
@@ -612,11 +534,12 @@ long double lnFact (double n) {
 
 /*Calculates shan Entropy per equation 3 of Wootton and Federhen (March 1993)
  * PERMUTATION (natural log)
+ * TODO Precalculate factorials and look for the results in a list b4 running the tool to save time rather than calculating them
+ * thousands of times
  */
 long double lnPerm (String<int> const & freqVector, int winLen) {
     long double ans;
     int i;
-    
     ans = lnFact(winLen);
     
     for (i = 0; i < length(freqVector); ++i) {
@@ -628,6 +551,19 @@ long double lnPerm (String<int> const & freqVector, int winLen) {
     return ans;
 }
 
+/* reverse the order of array entries, e.g.: 0 0 0 2 4 => 4 2 0 0 0
+ * 
+ */
+void reverse(int arr[], int count)
+{
+   int temp;
+   for (int i = 0; i < count/2; ++i)
+   {
+      temp = arr[i];
+      arr[i] = arr[count-i-1];
+      arr[count-i-1] = temp;
+   }
+}
 
 /* Calculates nat Log of colourings, the number of compositions in any complexity state
  * See equation 1 of Wootton and Federhen (March 1993)
@@ -636,10 +572,15 @@ long double lnPerm (String<int> const & freqVector, int winLen) {
 double lnAss (String<int> const & freqVector) {
     long double ans;
     
-    //TODO freqVector hat viele unnötige stellen, die alle 0 sind, da  das alphabet in ASCII erst bei 65 (?) beginnt
     String<int> sortedVector = freqVector;
-    quickSort(sortedVector, 0, length(sortedVector)-1);
-    reverseOrder(sortedVector);
+    
+    int tmpl=length(freqVector);
+    int* v_copy_tmp = new int[tmpl];
+    std::copy(&sortedVector[0],&sortedVector[tmpl],&v_copy_tmp[0]);
+    quickSort(v_copy_tmp, 0, tmpl-1);
+    std::reverse<int*>(&v_copy_tmp[0],&v_copy_tmp[tmpl]);
+    std::copy(&v_copy_tmp[0],&v_copy_tmp[tmpl],&sortedVector[0]);
+    
     
     ans = lnFact(alphSize);
     if (sortedVector[0] == 0) {
@@ -686,17 +627,16 @@ double lnAss (String<int> const & freqVector) {
  */
 long double getProb (int & len, String<int> const & freqVector) {
     long double ans, ans1, ans2 = 0.;
-    long double totSeq = ((long double) len) * (log((long double) alphSize));
+    long double subSeq = ((long double) len) * (log((long double) alphSize));
     ans1 = lnAss (freqVector);
     
     if (ans1 > -100000.0) {
         ans2 = lnPerm (freqVector, len);
     } else {
         //TODO
-        std::cout << " INSERT ERROR IN FUNCTION GETPROB" << std::endl;
+        std::cout << "ERROR: INSERT ERRORLOG IN FUNCTION GETPROB" << std::endl;
     }
-    ans = ans1 + ans2 - totSeq;
-    
+    ans = ans1 + ans2 - subSeq;
     
     return ans;
 }
@@ -737,15 +677,15 @@ void trim(String<AminoAcid> const & tempSeq, int & leftEnd, int & rightEnd, int 
         
         //shift window of length len over subsequence
         for (unsigned x = 0; x < length(tempSeq)-len+1; ++x) {
-            //TODO in folgenderzeile winStartPos+count+2 oder +1 oder 0
             String<AminoAcid> window = infix (tempSeq, winStartPos+count, winEndPos+count+1);
             
             if (length(window) <= 1) {
                 break;
             }
             
-            String<int> freqVector = initFreqVector();
+            String<int> freqVector = iniFreqVector;
             getAminoAcidCountInSequence(freqVector, window);
+            
             prob = getProb (len, freqVector);
             
             if (prob < minProb) {
@@ -765,28 +705,40 @@ void trim(String<AminoAcid> const & tempSeq, int & leftEnd, int & rightEnd, int 
     
 }
 
-
-/* getSourceVertex() finds all vertices that have no incoming edges
+/*
  * 
  */
-String<int> getSourceVertex ( TGraph const & gbaGraph )
+String<String<int> > getSourceVertexForSubGraph ( TGraph const & gbaGraph, int const & numComponents, String<unsigned> components )
 {
-    String<int> sourceVertexList;
+    
+    String<String<int> > sourceVertexList;
+    resize (sourceVertexList, numComponents);
+    int component;
+    
     int vertexCount = numVertices ( gbaGraph );
+    
+    for (int i = 0; i < numComponents; ++i) {
+        sourceVertexList[i] = 0;
+        appendValue(sourceVertexList[i], 0); //
+    }
 
     typedef Iterator<TGraph, VertexIterator>::Type TVertexIterator;
     TVertexIterator it ( gbaGraph );
-    for ( unsigned i = 0; i < vertexCount; ++i ) {
-        if ( inDegree ( gbaGraph, i ) == 0 ) {
-            appendValue ( sourceVertexList, i );
+    while (!atEnd(it)) {
+        if ( inDegree ( gbaGraph, getValue(it) ) == 0 ) {
+            component = getProperty(components, getValue(it)); //this is the ID of the subgraph for this Vertex
+            sourceVertexList[component][0] = component;
+            appendValue(sourceVertexList[component], getValue(it));
         }
+        goNext(it);
     }
+    
+
 
     return sourceVertexList;
 }
 
-
-/* getPaths() finds all vertex IDs of a path longer than a cutoff (3)
+/* getPaths() finds all vertex IDs of a path longer than a cutoff 
  * 
  */
 template <typename TSpec, typename TPredecessorMap, typename TVertexDescriptor1, typename TVertexDescriptor2>
@@ -799,106 +751,103 @@ void getPaths ( Graph<TSpec> const& g,
 {
 
     if ( source == v ) {
-        //std::cout << source;
         appendValue ( longPaths, source );
     } else if ( getProperty ( predecessor, v ) == getNil<typename VertexDescriptor<Graph<Directed<TCargo> > >::Type>() ) {
-        //std::cout << "No path from " << source << " to " << v << " exists.";
+        std::cout << "No path from " << source << " to " << v << " exists.";
 
     } else {
         getPaths ( g,predecessor, source, getProperty ( predecessor, v ), longPaths );
-        //std::cout << "," << v;
         appendValue ( longPaths, v );
     }
 
 }
 
-
-/* getLongestPaths() returns the longest path in a directed graph (reversed dijkstra algorithm, edgeValue * -1)
+/* getLongestPathsPerSubgraph() returns the longest path in a directed graph (reversed dijkstra algorithm, edgeValue * -1)
+ * We use all vertices without any incoming edges as source vertices.
+ * The original implementation (Kahveci, Li, 2006) extract every connected subgraph.
  * 
  */
-String<int> getLongestPaths ( TGraph const & gbaGraph )
-{
-    int edgeCount = numEdges ( gbaGraph );
-    String<int> sourceVertices = getSourceVertex ( gbaGraph );
-    int source = 0;
-    String<int> weights;
-    resize ( weights, edgeCount );
-    String <int> weightMap;
+String<int> getLongestPathsPerSubgraph(TGraph const & gbaGraph) {
+    String<String<int> > vertexIdComponents;
+    typedef Iterator<TGraph, VertexIterator>::Type TVertexIterator;
+
+    TVertexIterator it ( gbaGraph );
+    String<unsigned> components;
+    unsigned numComponents = 0;
     String<int> predMap;
     String<int> distMap;
+    String<int> weightMap;
+    String<int> weights;
+    String<int> longPaths;
+    StringSet<String<int> > longPathsEachSubgraph;
+    
+    resize ( weights, numEdges(gbaGraph));
+    
+    int component = 0;
     
     for ( int i = 0; i < numEdges ( gbaGraph ); ++i ) {
         weights[i] = -1;
     }
 
-    assignEdgeMap ( weightMap, gbaGraph, weights );    
-    dagShortestPath ( predMap, distMap, gbaGraph, source,weightMap );
+    assignEdgeMap ( weightMap, gbaGraph, weights );
+    
+    numComponents = weaklyConnectedComponents(components, gbaGraph);
 
-    typedef Iterator<TGraph, VertexIterator>::Type TVertexIterator;
-    TVertexIterator it ( gbaGraph );
-    String<int> longPaths;
-
-    while ( !atEnd ( it ) ) {
-        if ( getProperty ( distMap, getValue ( it ) ) <= -3 ) {
-            getPaths ( gbaGraph, predMap, ( TVertexDescriptor ) source, getValue ( it ), longPaths );
-            //std::cout << " (Distance: " << getProperty ( distMap, getValue ( it ) ) << ")\n";
-        }
-        goNext ( it );
+    String<String<int> >sourceVertices = getSourceVertexForSubGraph ( gbaGraph, numComponents, components );
+    
+    resize (vertexIdComponents, numComponents);
+    for (int i = 0; i < numComponents; ++i) {
+        vertexIdComponents[i] = sourceVertices[i][0];
+        appendValue(vertexIdComponents[i], 0); //minimumDist
+        appendValue(vertexIdComponents[i], 0); //node With longest Distance
+        appendValue(vertexIdComponents[i], 0); // end node with longest Distance
+        
     }
-
-    return longPaths;
-}
-
-// ---------------------------EXECUTION TIME FUNCTION
-
-#define duration(a) std::chrono::duration_cast<std::chrono::microseconds>(a).count()
-#define timeNow() std::chrono::high_resolution_clock::now()
-template<typename F, typename... Args>
-double funcTime ( F func, Args&&... args )
-{
-    TimeVar t1=timeNow();
-    func ( std::forward<Args> ( args )... );
-    return duration ( timeNow()-t1 );
-}
-
-
-/* maskSequence() mask the sequence at the given region by changing aminoacids to character X
- * 
- */
-void maskSequence ( String<AminoAcid> & seq, int const startMaskPosition, int const endMaskPosition )
-{
-    String<AminoAcid> maskedSeq;
-    for ( int i = startMaskPosition; i <= endMaskPosition; ++i ) {
-        seq[i-1] = 'X';
+    resize (longPathsEachSubgraph, numComponents);
+    
+    //this is the most expensive part in GBA for big sequences
+    //potential for optimization !!
+    while (!atEnd(it)) {
+        
+        if ( outDegree ( gbaGraph, getValue(it) ) == 0 ) {
+           
+        
+            component = getProperty(components, getValue(it)); //this is the ID of the subgraph for this Vertex
+            
+            for (int i = 2; i < length(sourceVertices[component]); ++i) {
+                dagShortestPath ( predMap, distMap, gbaGraph, sourceVertices[component][i] ,weightMap );
+                
+                if ( getProperty ( distMap, getValue ( it ) ) < vertexIdComponents[component][1]) {
+                    //std::cout << "path from: " << sourceVertices[component][i] << " to " << getValue(it) << " and distance is: " << getProperty(distMap, getValue(it));
+                    //_printPath(gbaGraph, predMap, (TVertexDescriptor) sourceVertices[component][i], getValue(it));
+                    vertexIdComponents[component][1] = getProperty(distMap, getValue(it)); //the longest distance
+                    vertexIdComponents[component][2] = sourceVertices[component][i]; //saving the sourcenode from the longest path from component
+                    vertexIdComponents[component][3] = getValue(it);
+                    
+                    getPaths ( gbaGraph, predMap, ( TVertexDescriptor ) vertexIdComponents[component][2], (TVertexDescriptor) vertexIdComponents[component][3], longPaths );    
+                    
+                    resize (longPathsEachSubgraph[component], length(longPaths));
+                    longPathsEachSubgraph[component] = longPaths;
+                    clear(longPaths);
+                }
+            }
+        }
+        goNext(it);
     }
     
-    return;
+    //for (int i = 0; i < length(sourceVertices); ++i) {
+    //    printSeqAnString(sourceVertices[i]);
+    //}
+    
+    String<int> concatLongPaths = concat(longPathsEachSubgraph);
+    //std::cout << "long paths: " << std::endl;
+    //printSeqAnString(concatLongPaths);
+    return concatLongPaths;
 }
 
-
-/* showScoringMatrix()
+/* datastructure for the sampleLenPercentage file (post-processing, gba)
  * 
  */
-template <typename TScoreValue, typename TSequenceValue, typename TSpec>
-void showScoringMatrix ( Score<TScoreValue, ScoreMatrix<TSequenceValue, TSpec> > const & scoringScheme )
-{
-
-
-    for ( unsigned i=0; i<ValueSize<TSequenceValue>::VALUE; ++i ) {
-        std::cout << "\t" << TSequenceValue ( i );
-    }
-
-    std::cout << std::endl;
-
-    for ( unsigned i = 0; i < ValueSize<TSequenceValue>::VALUE; ++i ) {
-        for ( unsigned j=0; j < ValueSize<TSequenceValue>::VALUE; ++j ) {
-            std::cout << "\t" << score ( scoringScheme, TSequenceValue ( i ), TSequenceValue ( j ) );
-        }
-        std::cout << std::endl;
-    }
-
-    return;
-}
 
 struct sampLenF {
     std::string start;
@@ -920,7 +869,6 @@ struct sampLenF {
                 data.swap(tmp);
             } else {
                 std::cout << "Filterprocess failed. Can't read file 'sampledLenRepPer'." << std::endl;
-                //str.setstate(std::ios::failbit);
             }
         }
      
@@ -935,14 +883,15 @@ struct sampLenF {
     }
 };
 
-/* readSampleLenPercentage()
+/* 
  * 
  */
 String<String<double> > readSampleLenPercentage (String<char> const & pathToFile) {
-    //String<char> sampleLenPerFile = getAbsolutePath (toCString(pathToFile));
+    String<char> sampleLenPerFile = getAbsolutePath (toCString(pathToFile));
+    
     String<String<double> > sampLenPer;
     String<double> grp;
-    ifstream readFile(toCString(pathToFile));
+    ifstream readFile(toCString(sampleLenPerFile));
     sampLenF data;
     int i = 0;
     while(readFile >> data) {
@@ -965,17 +914,14 @@ String<String<double> > readSampleLenPercentage (String<char> const & pathToFile
 }
 
 
-void readSeqFromFastaFile ( String<char> const & pathToFile, StringSet<String<AminoAcid> > & seqSet, StringSet<String<char> > & seqIds)
+int readSeqFromFastaFile ( String<char> const & pathToFile, StringSet<String<AminoAcid> > & seqSet, StringSet<String<char> > & seqIds)
 {
-
-    //String<char> seqFileName = getAbsolutePath("demos/tutorial/sequence_io/example.fa");
     String<char> seqFileName = getAbsolutePath ( toCString ( pathToFile ) );
-    
 
     SeqFileIn seqFileIn;
     if ( !open ( seqFileIn, toCString ( seqFileName ) ) ) {
         std::cerr << "ERROR: Could not open the file.\n";
-        return;
+        return 1;
     }
 
     try {
@@ -983,28 +929,14 @@ void readSeqFromFastaFile ( String<char> const & pathToFile, StringSet<String<Am
 
     } catch ( Exception const & e ) {
         std::cout << "ERROR: " << e.what() << std::endl;
-        return;
+        return 1;
     }
     
-    /*
-    for ( unsigned i = 0; i < length ( seqIds ); ++i ) {
-        std::cout << seqIds[i] << '\t' << seqSet[i] << '\n';
-    }*/
-
-    //appendValue(seqSet, pathToFile);
-
-
-    return ;
+    return 0;
 }
 
 void writeRegsIntoFile (String<String<String<int> > > const & segments, StringSet<String<char> > seqIds, String<char> const & pathToFile) {
     String<char> seqFileName = getAbsolutePath ( toCString ( pathToFile ) );
-    
-    /*SeqFileOut seqFileOut;
-    if ( !open ( seqFileOut, toCString ( seqFileName ) ) ) {
-        std::cerr << "ERROR: Could not open the file.\n";
-        return ;
-    }*/
     
     ofstream seqFileOut;
     seqFileOut.open (toCString(pathToFile));
@@ -1025,6 +957,22 @@ void writeRegsIntoFile (String<String<String<int> > > const & segments, StringSe
     return;
 }
  
+ /* SeqAn String AminoAcid contains 27 characters, because "wildcards" like B for Aspartic Acid or Asparagine is included.
+  * in order to get the best calculations when computing entropies we need to extract those wildcards
+  */
+bool areRegularAminoAcids (String<AminoAcid> AA) {
+    char firstA = AA[0];
+    char secA = AA[1];    
+    
+    if (firstA == (char)'B' || firstA == (char)'J' || firstA == (char)'Z' || firstA == (char)'X' || firstA == (char)'O' || firstA == (char)'U' || firstA == (char)'*' ) {
+        return false;
+    }
+    if (secA == (char)'B' || secA == (char)'J' || secA == (char)'Z' || secA == (char)'X' || secA == (char)'O' || secA == (char)'U' || secA == (char)'*') {
+        return false;
+    }
+    return true;
+} 
+
   
 /* 2-gram complexity measure
  * the entire sequence is considered as a permutation of 2-grams
@@ -1039,11 +987,15 @@ void computeTwoLetterScoringMatrix (double (&array)[rows][cols], StringSet<Strin
             twoLetScore = 0;
             String<char> lets1 = twoGramAlphabet[i];
             String<char> lets2 = twoGramAlphabet[j];
+            if (areRegularAminoAcids(lets1) && areRegularAminoAcids(lets2)) {
+                twoLetScore = twoLetScore + score(blosum62Matrix, lets1[0], lets2[0]);
+                twoLetScore = twoLetScore + score(blosum62Matrix, lets1[1], lets2[1]);
+                array[i][j] = twoLetScore / 2;
+                
+            } else {
+                array[i][j] = 0;
+            }
             
-            twoLetScore = twoLetScore + score(blosum62Matrix, lets1[0], lets2[0]);
-            twoLetScore = twoLetScore + score(blosum62Matrix, lets1[1], lets2[1]);
-            
-            array[i][j] = twoLetScore / 2;
         }
     }
     
@@ -1060,15 +1012,13 @@ int strToInt (string str) {
 }
 
 
-template <size_t rows, size_t cols>
-double computeTwoLetterEntropy(String<AminoAcid> const & subString, double (&twoLetterScoringMatrix)[rows][cols]) {
+template <typename tMat, size_t rows, size_t cols>
+double computeTwoLetterEntropy(String<AminoAcid> const & subString, tMat (&twoLetterScoringMatrix)[rows][cols]) {
     
     double entropy = 0.;
-    //TODO useless: ?!StringSet<String<char> > twoGramAlphabet = initTwoGramAlphabet();
     String<int> twoLetterFrequencies;
     resize (twoLetterFrequencies, 676);
-    
-    
+     
     for (unsigned i = 0; i < 676; ++i) {
         twoLetterFrequencies[i] = 0;
     }
@@ -1094,11 +1044,9 @@ double computeTwoLetterEntropy(String<AminoAcid> const & subString, double (&two
         singleProb = 0;
         if (twoLetterFrequencies[i] != 0) {
             for (unsigned j = 0; j < 676; ++j) {
-                if (twoLetterFrequencies[j] != 0) {
-                    
-                    singleProb = singleProb + (twoLetterFrequencies[j] * twoLetterScoringMatrix[i][j]);
-                }
+                singleProb = singleProb + (twoLetterFrequencies[j] * twoLetterScoringMatrix[i][j]);
             }
+            
             ps[k] = singleProb;
             sum = sum + singleProb;
             k += 1;
@@ -1111,29 +1059,27 @@ double computeTwoLetterEntropy(String<AminoAcid> const & subString, double (&two
         entropy = entropy + ( 0. - ps[i] * log( ps[i] ));   
     }
     
-    
-    //std::cout << "ENTROPY: ";
-    //printSeqAnString(subString);
-    //std::cout << ": " << entropy << std::endl;
-    
     return entropy;
 }
 
 /* Extend current blocks to left or right in single steps 
  * if the extended region has a lower entropy, we replace the old region
  */  
-String<int> extend (int startPos, int endPos, int limit, string const direction, String<AminoAcid> const & seq) {
+String<String<int> > extend (int startPos, int endPos, int limit, string const direction, String<AminoAcid> const & seq) {
     double comp1 = 0;
+    //std::cout << "startPos: " << startPos << " endpos: " << endPos << " limit: " <<limit << std::endl;
+    
     double comp2 = 0;
     int pointer = 0;
     int startDecPos = startPos;
     int endDecPos = endPos;
     
     String<AminoAcid> extReg = infix(seq, startPos-1, endPos);
-    String<int> decRegs;
+    String<String<int> > decRegs;
+    clear (decRegs);
     
-    if (direction == "left") {
-        
+    
+    if (direction == "left") {    
         bool dec = false;
         pointer = startPos -2;
         while ((pointer > limit) && (pointer > (startPos - 17))) {
@@ -1145,13 +1091,17 @@ String<int> extend (int startPos, int endPos, int limit, string const direction,
             if (comp1 > comp2) {
                 if (!dec) {
                     dec = true;
+                    endDecPos = pointer+2;
                 }    
             } else if (dec) {
                 dec = false;
                 startDecPos = pointer + 2;
                 if (comp1 < comCut) {
-                    appendValue(decRegs, startDecPos);
-                    appendValue(decRegs, endDecPos);
+                    String<String<int> > found = startDecPos;
+                    appendValue(found[0], endDecPos);
+                    append(found, decRegs);
+                    resize (decRegs, length(found));
+                    decRegs = found;
                 }
             }
             
@@ -1169,8 +1119,12 @@ String<int> extend (int startPos, int endPos, int limit, string const direction,
                     dec = false;
                     startDecPos = pointer + 2;
                     if (comp1 < comCut) {
-                        appendValue(decRegs, startDecPos);
-                        appendValue(decRegs, endDecPos);
+                        String<String<int> > found = startDecPos;
+                        appendValue(found[0], endDecPos);
+                        append(found, decRegs);
+                        resize (decRegs, length(found));
+                        decRegs = found;
+                        
                     }
                 }
                 --pointer;
@@ -1182,13 +1136,20 @@ String<int> extend (int startPos, int endPos, int limit, string const direction,
         if ((pointer == limit) && (dec)) {
             startDecPos = pointer + 2;
             if (comp2 < comCut) {
-                appendValue(decRegs, startDecPos);
-                appendValue(decRegs, endDecPos);
+                
+                String<String<int> > found = startDecPos;
+                appendValue(found[0], endDecPos);
+                append(found, decRegs);
+                resize (decRegs, length(found));
+                decRegs = found;
+                
             }
         }
         if (length(decRegs) == 0) {
-            appendValue(decRegs, startPos);
-            appendValue(decRegs, endPos);
+            
+            //String<int> addToDecRegs = startPos;
+            //appendValue(addToDecRegs, endPos);
+            //appendValue(decRegs, addToDecRegs);
             
         } else {
             //std::cout << "left: NOT empty" << std::endl;
@@ -1209,14 +1170,15 @@ String<int> extend (int startPos, int endPos, int limit, string const direction,
             if (comp1 > comp2) {
                 if (!dec) {
                     dec = true;
+                    startDecPos = pointer-1;
                 }    
-                
             } else if (dec) {
                 dec = false;
                 endDecPos = pointer -1;
                 if (comp1 < comCut) {
-                    appendValue(decRegs, startDecPos);
-                    appendValue(decRegs, endDecPos);
+                    String<String<int> > found = startDecPos;
+                    appendValue(found[0], endDecPos);
+                    append(decRegs, found);
                 }
             }
             
@@ -1234,27 +1196,24 @@ String<int> extend (int startPos, int endPos, int limit, string const direction,
                     dec = false;
                     endDecPos = pointer - 1;
                     if (comp1 < comCut) {
-                        appendValue(decRegs, startDecPos);
-                        appendValue(decRegs, endDecPos);
+                        
+                        String<String<int> > found = startDecPos;
+                        appendValue(found[0], endDecPos);
+                        append(decRegs, found);                      
                     }
                 }
-                
                 ++pointer;
             }
             
             if ((pointer == limit) && (dec)) {
                 endDecPos = limit - 1;
-                appendValue(decRegs, startDecPos);
-                appendValue(decRegs, endDecPos);
+                
+                String<String<int> > found = startDecPos;
+                appendValue(found[0], endDecPos);
+                append(decRegs, found);
+   
             }
-        }
-        
-        if (length(decRegs) == 0) {
-            appendValue(decRegs, startPos);
-            appendValue(decRegs, endPos);
-        } else {
-            //std::cout << "right: NOT empty" << std::endl;
-        }        
+        }     
     }  
     
     return decRegs;
@@ -1294,7 +1253,7 @@ void convertIdsToPosition(String<int> & lcrBlocks, String<int> const & uniquePat
     return;
 }
 
-/* returns regions blockwise by position in the sequence e.g. 4-16
+/* returns regions blockwise by position in the sequence from a list e.g. 4-7, 9-10 from 4 5 6 7 9 10 
  * 
  */
 String<String<int> > genBlocksFromList(String<int> const & blockList) {
@@ -1304,24 +1263,19 @@ String<String<int> > genBlocksFromList(String<int> const & blockList) {
     int counter = 0;
     int startPosLcrBlock = tmpBlockList[pos];    
     
-    std::cout << "liste" << std::endl;
-    printSeqAnString(tmpBlockList);
-    
     for (unsigned i = 0; i < length(tmpBlockList) ; ++i) {
         if (tmpBlockList[i]+1 !=tmpBlockList[i+1] ) {
             int endPosLcrBlock = tmpBlockList[i];
-            appendValue(lcrBlocks, startPosLcrBlock);
-            appendValue(lcrBlocks[counter], endPosLcrBlock);
+            if (endPosLcrBlock - startPosLcrBlock > 1) {    
+                appendValue(lcrBlocks, startPosLcrBlock);
+                appendValue(lcrBlocks[counter], endPosLcrBlock);
+                ++counter;
+            }
             //std::cout << startPosLcrBlock << "-" << endPosLcrBlock << std::endl;
             startPosLcrBlock = tmpBlockList[pos+1];
-            ++counter;
+            
         }
         ++pos;
-    }
-    
-    std::cout << "lcrBlocks: " << std::endl;
-    for (unsigned i = 0; i < length(lcrBlocks); ++i) {
-        printSeqAnString(lcrBlocks[i]);
     }
     
     return lcrBlocks;
@@ -1340,48 +1294,216 @@ String<String<int> > generateLCRBlocks (String<int> const & longPaths, String<St
             appendValue (uniquePathVertIds, longPaths[i]);
         }
     }
-    
-    convertIdsToPosition(lcrBlockList, uniquePathVertIds, vertexArray);
+     
+    convertIdsToPosition(lcrBlockList, uniquePathVertIds, vertexArray);   
     String<String<int> > lcrBlocks = genBlocksFromList (lcrBlockList);
     
     return lcrBlocks;
 }
 
-/* working on LCR blocks (extending while considering limits to the left and right)
- * limits are the end of the sequence or found blocks positions
+/*
+ * 
  */
-String<String<int> > processBlocks (String<String<int> > const & blocks, String<AminoAcid> const & seq) {
-    String<int> tmpBlocks;
-    resize (tmpBlocks, 2);
-    String<int> saveExtendedBlock;
-    String<String<int> > extendedBlocks;
-    int limit = 0;
-    int lcrBlockStart = 0;
-    int lcrBlockEnd = 0;
+bool shareLetter (String<AminoAcid> const & str1, String<AminoAcid> const & str2) {
+    bool shared = false;
     
-    
-    for (unsigned i = 0; i < length(blocks); ++i) {
-        if (i == 0) {
-            limit = -1;
-        } else {
-            limit = lcrBlockEnd -1;
+    for (int i = 0; i < length(str1); ++i) {
+        for (int j = 0; j < length(str2); ++j) {
+            if (str1[i] == str2[j]) {
+                shared = true;
+                return shared;
+            }
         }
-        
-        tmpBlocks = extend (blocks[i][0], blocks[i][1], limit, "left", seq);
-        appendValue (saveExtendedBlock, tmpBlocks[0]);
-        
-        limit = length(seq);
-        
-        tmpBlocks = extend (blocks[i][0], blocks[i][1], limit, "right", seq);
-        lcrBlockEnd = tmpBlocks[1];
-        
-        appendValue (saveExtendedBlock, tmpBlocks[1]);
-        appendValue(extendedBlocks, saveExtendedBlock);
-        clear(tmpBlocks);
-        clear(saveExtendedBlock);
     }
     
-    return extendedBlocks;
+    return shared;
+}
+
+
+/*
+ * 
+ */
+bool checkContribution (String<int> const & currentBlock, String<String<int> > const & decRegs, String<AminoAcid> const & seq) {
+    bool contributed = false;
+    String<String<int> > regs = decRegs;
+    String<int> block;
+    int i = 0;
+    int len = length(regs);
+    while ((i < len) && (!contributed)) {
+        block = regs[i];
+        int start = block[0];
+        int end = block[1];
+        String<AminoAcid> subBlock = infix(seq, start, end+1);
+        String<AminoAcid> curBlock = infix(seq, currentBlock[0], currentBlock[1]+1);
+        contributed = shareLetter(curBlock, subBlock);
+        ++i;
+    }
+    return contributed;
+}
+
+
+/* working on LCR blocks (extending while considering limits to the left and right)
+ * limits are the end of the sequence or start/end positions of found blocks
+ */
+String<String<int> > processBlocks (String<String<int> > const & blocks, String<AminoAcid> const & seq) {
+    String<String<int> > tmpBlocks = blocks;
+    String<String<int> > frontLcrs;
+    String<String<int> > backLcrs;
+    String<String<int> > lcrs;
+    String<int> currentBlock;
+    resize (currentBlock, 2);
+    bool isFirstBlock = true;
+    String<int> saveExtendedBlock;
+
+    String<int> tmpBlock;
+    int limit = 0;
+    int startPos, endPos = 0;
+    
+    int counter = 0;
+    while (length(tmpBlocks) != 0) {
+        int lcrBlockStart = 0;
+        int lcrBlockEnd = 0;    
+        clear(frontLcrs);
+        clear(backLcrs);
+        bool extendToLeft = true;
+        bool find = false;
+        int lastElement = length(lcrs)-1;
+        if (length(lcrs)!=0) {
+            
+            tmpBlock = lcrs[lastElement];
+            
+            lcrBlockEnd = tmpBlock[1];
+            while ((!find)&& (length(tmpBlocks)!=0)) {
+
+                currentBlock = tmpBlocks[0];
+                
+                erase(tmpBlocks, 0);
+                
+                startPos = currentBlock[0];
+                endPos = currentBlock[1];
+                
+                if (startPos < lcrBlockEnd) {
+                    if (endPos > lcrBlockEnd) {
+                        if ((endPos-lcrBlockEnd) >= 3) {
+                            
+                            startPos = lcrBlockEnd + 1;
+                            extendToLeft = false;
+                            find = true;
+                        }
+                    }
+                } else {
+                    find = true;
+                }
+            }
+        } else {
+            
+            currentBlock = tmpBlocks[0];
+            
+            erase(tmpBlocks, 0);
+            
+            startPos = currentBlock[0];
+            endPos = currentBlock[1];
+            find = true;
+        }
+        
+        
+        if (find==true){
+            if (isFirstBlock==true) {
+                limit = -1;
+                isFirstBlock=false;
+                frontLcrs = extend (startPos, endPos, limit, "left", seq);
+            } else if (extendToLeft){
+                
+                limit = lcrBlockEnd -1;
+                frontLcrs= extend (startPos, endPos, limit, "left", seq);
+            }
+            
+            limit = length(seq)+1;
+            backLcrs = extend(startPos, endPos, limit, "right", seq);
+            
+            double com = 0.;
+            int cbStart = currentBlock[0];
+            int cbEnd = currentBlock[1];
+            String<AminoAcid> tmpSeq = infix(seq, cbStart, cbEnd+1);
+            com = computeTwoLetterEntropy(tmpSeq, twoLetterScoringMatrix);
+            bool contributed = false;
+            
+            if (length(frontLcrs) != 0) {
+                tmpBlock = frontLcrs[0];
+                lcrBlockStart = tmpBlock[0];
+                if (com > comCut) {
+                    contributed = checkContribution(currentBlock, frontLcrs, seq);
+                    if (!contributed) {
+                        lcrBlockEnd = startPos - 1;
+                        
+                    } else {
+                        lcrBlockEnd = endPos;
+                    }
+                } else {
+                    lcrBlockEnd = endPos;
+                }
+                
+                String<int> addToLcrs = lcrBlockStart;
+                appendValue(addToLcrs, lcrBlockEnd);
+                appendValue (lcrs, addToLcrs);
+            }
+            
+            bool combine = false;
+            
+            if ((!contributed) && (com > comCut)) {
+                contributed = checkContribution(currentBlock, backLcrs, seq);
+            
+                if (!contributed) {
+                        lcrBlockStart = endPos + 1;
+                } else {
+                    if (length(frontLcrs) != 0) {
+                        combine = true;
+                    }
+                }
+            } else if (length(frontLcrs) != 0) {
+                combine = true;
+            }
+            
+            if (length(backLcrs) != 0) {
+                int lastElemBackLcr = length(backLcrs)-1;
+                tmpBlock = backLcrs[lastElemBackLcr];
+                lcrBlockEnd = tmpBlock[1];
+                
+                if (combine) {
+                    limit = length(lcrs);
+                    tmpBlock = lcrs[limit-1];
+                    
+                    erase(lcrs, limit-1);
+                    lcrBlockStart = tmpBlock[0];
+                    
+                } else {
+                    if (com < comCut ) {
+                        lcrBlockStart = startPos;
+                    } else if (contributed) {
+                        lcrBlockStart = startPos;
+                    } else {
+                        lcrBlockStart = endPos + 1;
+                    }
+                }
+                
+                String<int> addToLcrs = lcrBlockStart;
+                appendValue(addToLcrs, lcrBlockEnd);
+                appendValue (lcrs, addToLcrs);
+                
+                
+            } else {
+                if ((length(frontLcrs) == 0) && (!contributed) && (com < comCut)) {
+                    
+                    String<int> addToLcrs = currentBlock[0];
+                    appendValue(addToLcrs, currentBlock[1]);
+                    appendValue (lcrs, addToLcrs);
+                
+                }
+            }
+        }
+    }
+    
+    return lcrs;
 }
 
 /* merging overlapping regions e.g. 3-14 and 12-22 -> 3-22
@@ -1408,7 +1530,7 @@ String<String<int> > mergeRegions (String<String<int> > const & extendedBlocks) 
         int nextBlockStart = extendedBlocks[i+1][0];
         int nextBlockEnd = extendedBlocks[i+1][1];
         
-        if ((curBlockStart <= nextBlockStart) && (nextBlockStart <= curBlockEnd)) {
+        if ((curBlockStart <= nextBlockStart) && (nextBlockStart-1 <= curBlockEnd)) {
             int lcrStart = min(curBlockStart, nextBlockStart);
             int lcrEnd = max(curBlockEnd, nextBlockEnd);
             
@@ -1442,7 +1564,7 @@ StringSet<String<int> > checkLeftRegs (int const & aliStart, int const & aliEnd,
         String<AminoAcid> str = infix(seq, start-1, start+aliStart-2);
         
         com = computeTwoLetterEntropy(str, twoLetterScoringMatrix);
-        com = com/(length(str)-1);
+        com = com/(length(str)-1); //normalize
         
         if (com <= cCut) {
             appendValue (leftPrep, start);
@@ -1454,12 +1576,11 @@ StringSet<String<int> > checkLeftRegs (int const & aliStart, int const & aliEnd,
     
     int ergebnis = end-start+1-aliEnd;
     
-    
     if (ergebnis > 7) {
         
         String<AminoAcid> str = infix(seq, start+aliEnd-1, end);
         com = computeTwoLetterEntropy(str, twoLetterScoringMatrix);
-        com = com/(length(str)-1);
+        com = com/(length(str)-1); //normalize
         if (com <= cCut) {
             appendValue (leftPrep, start+aliEnd);
             appendValue (leftPrep, end);
@@ -1528,17 +1649,6 @@ StringSet<String<int> > findAlignment (String<AminoAcid> const & seq1, String<Am
         int result = localAlignment(align, Score<int, ScoreMatrix<AminoAcid, ScoreSpecBlosum62> >(-0.5,-10));
         int len=length(row(align,0));
         
-        
-        /*
-        std::cout << "            SequenPos: 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7" << std::endl;
-        std::cout << "            Sequence1: ";
-        printSeqAnString(seq1) ;
-        std::cout << "            Sequence2: ";
-        printSeqAnString(seq2);
-        std::cout << "            Score: " << result << "\n";
-        std::cout << "            The resulting alignment is\n" << align << "\n";
-        */
-        
         auto src1Pos = toSourcePosition(row(align,0),0);
         auto src1End = toSourcePosition(row(align,0),len-1);
         auto src2Pos = toSourcePosition(row(align,1),0);
@@ -1550,9 +1660,6 @@ StringSet<String<int> > findAlignment (String<AminoAcid> const & seq1, String<Am
         for (unsigned i = 0; i < len; ++i) {
             AminoAcid firstChar = row(align,0)[i];
             AminoAcid secChar = row(align,1)[i];
-            
-            //print score of aligned characters
-            //std::cout << "            " <<(char)firstChar << "-" << (char)secChar << " has a score of: " << score(blosum62Matrix, firstChar, secChar) << std::endl;
             
             if (firstChar == secChar) {
                 ++similarity;
@@ -1579,13 +1686,11 @@ StringSet<String<int> > findAlignment (String<AminoAcid> const & seq1, String<Am
 }
 
 /*
- * mark == -1 means forward, mark == -2 means backwards 
+ * mark == -1 means front, mark == -2 means back
  */
 StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, String<int> adjBlock, String<AminoAcid> const & seq, double const & cCut, int const & mark) {    
     double com = 0;
     StringSet<String<int> > result;
-    
-    //TODO better ? infix(seq, start1-2, ...);
     String<AminoAcid> seq1 = infix(seq, start1-1, end1);
     int start2 = adjBlock[0];
     int end2 = adjBlock[1];
@@ -1594,17 +1699,18 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
     
     StringSet<String<int> > aliPos;
     if (mark == -1) {
-        //TODO where'S the difference between seq2,seq1 and seq1,seq2 ??!?!
         aliPos = findAlignment (seq2, seq1);
     } else {
         aliPos = findAlignment (seq1, seq2);
     }
     
-    /*
-    for (unsigned i = 0; i < length(aliPos); ++i) {
-        std::cout << "        ";
+    /* 
+    std::cout << "AliPos: " << std::endl;
+    for (int i = 0; i < length(aliPos); ++i) {
         printSeqAnString(aliPos[i]);
-    }*/
+    }
+    */
+    
     
     if (length(aliPos) != 0) {
         int aliStart2 = aliPos[0][0];
@@ -1612,7 +1718,6 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
             
         int aliStart1 = aliPos[1][0];
         int aliEnd1 = aliPos[1][1];
-        //TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO         
         
         int append1 = 0;
         int append2 = 0;
@@ -1628,11 +1733,7 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
             
             appendValue (result, resultPrep);
             StringSet<String<int> > left = checkLeftRegs (aliStart1, aliEnd1, start1, end1, seq, cCut);
-            /*
-            for (unsigned i = 0; i < length(left); ++i) {
-                std::cout << "        ";
-                printSeqAnString(left[i]);
-            }*/
+            
             addToResult (result, left);
             
         } else {
@@ -1645,11 +1746,7 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
             clear (resultPrep);
             
             StringSet<String<int> > left = checkLeftRegs (aliStart2, aliEnd2, start1, end1, seq, cCut);
-            /*
-            for (unsigned i = 0; i < length(left); ++i) {
-                std::cout << "        ";
-                printSeqAnString(left[i]);
-            }*/
+
             
             addToResult (result, left);
             
@@ -1661,11 +1758,6 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
             clear (resultPrep);
             
             left = checkLeftRegs (aliStart1, aliEnd1, start2, end2, seq, cCut);
-            /*
-            for (unsigned i = 0; i < length(left); ++i) {
-                std::cout << "        ";
-                printSeqAnString(left[i]);
-            }*/
             
             addToResult (result, left);
             
@@ -1677,7 +1769,7 @@ StringSet<String<int> > checkAdjBlock (int const & start1, int const & end1, Str
 }
 
 
-/* cheks if there are deletable characters in a region 
+/* checks if there are deletable characters in a region 
  * 
  */
 StringSet<String<int> > checkDeletability (String<String<int> > const & lcrs, int const & maxIndex, String<AminoAcid> const & seq, double const & cCut) {    
@@ -1702,6 +1794,7 @@ StringSet<String<int> > checkDeletability (String<String<int> > const & lcrs, in
     }
     
     if (length(result) == 0) {
+        
         if (maxIndex != length(lcrs)-1) {
             block = lcrs[maxIndex+1];
             
@@ -1729,13 +1822,14 @@ StringSet<String<int> > checkDeletability (String<String<int> > const & lcrs, in
  */
 String<String<int> > filter (String<String<int> > const & mergedBlocks, String<AminoAcid> const & seq) {
     
+    //std::cout << "--------------------------FILTERING PROCESS----------------------------"<<std::endl;
     int seqLen = length(seq);
     int len = length(mergedBlocks);
     String<double> complexityList ;
     String<String<int> > tmpBlocks = mergedBlocks;
-    String<String<double > > sampLenPer = readSampleLenPercentage("sampledLenRepPer");
+    String<String<double> > sampLenPer = readSampleLenPercentage("../LCR-finder/matrices/sampledLenRepPer");
     double comp = 0.;
-    double max = -222222222;
+    double max = -9999999;
     int it = 0;
     
     if (len != 1) {
@@ -1745,7 +1839,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
             String<AminoAcid> str = infix(seq, start-1, end);
             
             comp = computeTwoLetterEntropy(str, twoLetterScoringMatrix);
-            comp = comp/(length(str)-1);
+            comp = comp/(length(str)-1); //normalize
             appendValue (complexityList, comp);
         }
         
@@ -1763,7 +1857,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
         while (!found && (lineNr <length(sampLenPer))) {
             shortest = sampLenPer[lineNr][0];
             longest = sampLenPer[lineNr][1];
-            per = sampLenPer[lineNr][2];
+            per = sampLenPer[lineNr][3];
             
             if ((seqLen >= shortest) && (seqLen <= longest)) {
                 limit = len * (1-per);
@@ -1771,6 +1865,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
             } else if (seqLen < shortest) {
                 int diff1 = shortest - seqLen;
                 int diff2 = seqLen - preLongest;
+                
                 if ((diff2 > diff1) || (preLongest == 0)) {
                     limit = len * (1-per);
                     found = true;
@@ -1794,6 +1889,8 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
         while (lineNr < limit) {
             int compLen = length(complexityList);
             
+            it = 0;
+            max = -9999999;
             while (it < compLen) {
                 double comp = complexityList[it];
                 if (comp > max) {
@@ -1804,6 +1901,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
             }
             
             cCut = complexityList[maxIndex];
+            erase(complexityList, maxIndex);
             ++lineNr;
         }
         lineNr = 0;
@@ -1812,18 +1910,18 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
         StringSet<String<int> > result;
         
         while ((lineNr < limit) && (len != 1) && (it < len)) {
+            
             int start = tmpBlocks[it][0];
             int end = tmpBlocks[it][1];
             String<AminoAcid> str = infix(seq, start-1, end);
             
             comp = computeTwoLetterEntropy(str, twoLetterScoringMatrix);
-            comp = comp/(length(str)-1);
+            comp = comp/(length(str)-1); //normalize
             
             if (comp >= cCut ) {
                 result = checkDeletability (tmpBlocks, it, seq, cCut);
                 
                 int rSize = length(result);
-                std::cout << "RSIZE: " << rSize << std::endl;
                 bool fromBack = false;
                 if (rSize != 0) {
                     
@@ -1848,7 +1946,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
                     len = length(tmpBlocks);
                 
                 } else {
-                    
+                    //std::cout << "removed (high complexity)" << std::endl;
                     erase (tmpBlocks, it);
                     ++lineNr;
                     len = length(tmpBlocks);
@@ -1859,20 +1957,7 @@ String<String<int> > filter (String<String<int> > const & mergedBlocks, String<A
         }
     }
     
-    /*
-    std::cout << "MEINE TMPBLOCKS: " << std::endl;
-    
-    for (unsigned i = 0; i < length(tmpBlocks); ++i) {
-        for (unsigned j = 0; j < length(tmpBlocks[i]); ++j) {
-            std::cout << tmpBlocks[i][j];
-        }
-        std::cout << std::endl;
-    }*/
-    
-    
-    
     return tmpBlocks;
-        
 }
     
 
@@ -1884,7 +1969,6 @@ void segSeq (String<AminoAcid> const & seq, int offset, int const & winLen, floa
     int first = downset;
     int last = length(seq) - upset;
     int lowLim = first;
-    
     
     String<long double> H = initSeqEnt(seq);
     
@@ -1902,17 +1986,13 @@ void segSeq (String<AminoAcid> const & seq, int offset, int const & winLen, floa
             break;
         }
         
-        String<int> freqVector = initFreqVector();
-        
+        String<int> freqVector = iniFreqVector;
         String<AminoAcid> window = infix (seq, winStartPos, winEndPos);
         
         getAminoAcidCountInSequence(freqVector, window);
         
         long double K2KV = shanEntropy (winLen, freqVector);
-        
-        
         H[i+first] = K2KV;
-        
         
     }
    
@@ -1960,11 +2040,18 @@ void segSeq (String<AminoAcid> const & seq, int offset, int const & winLen, floa
 
 
 
-// ---------------------------          SEG
+/* SEG algorithm starts here
+ * 
+ */
 String<String<int> > seg ( String<AminoAcid> const & seq, unsigned const & winLen, float const & K2A, float const & K2B )
 {
-    int offset = 0;
     
+    if ( winLen > length ( seq ) | K2A > K2B ) {
+        std::cerr << "Input-parameters are not allowed." << std::endl;
+        return 0;
+    }
+    
+    int offset = 0;
     StringSet<String<int> > segs;
     
     segSeq (seq, offset, winLen, K2A, K2B, segs);
@@ -1975,58 +2062,41 @@ String<String<int> > seg ( String<AminoAcid> const & seq, unsigned const & winLe
     } 
     
     String<String<int> > mergedRegions = mergeRegions(segs);
+    
     std::cout << "low complexity regions found at: " << std::endl;
     for (unsigned i = 0; i < length(mergedRegions); ++i) {
         std::cout << mergedRegions[i][0] << " - " << mergedRegions[i][1] << '\t';
-        /*
-        for (int x = mergedRegions[i][0]-1; x < mergedRegions[i][1]; ++x) {
-         
-            std::cout << seq[x];
-        }*/
         std::cout << std::endl;
     }
-    
     
     return mergedRegions;
 }
 
-// ---------------------------          GBA
-int gba (String<AminoAcid> const & seq, int const winLen, int const maxIndelTandem, int const maxIndelCryptic) {
+
+/* GBA algorithm starts here
+ * 
+ */
+String<String<int> > gba (String<AminoAcid> const & seq, int const winLen, int const maxIndelTandem, int const maxIndelCryptic, int const & originalImp) {
     
     String<int> vertex;
     String<String<int> > vertexArray;
 
-    if ( winLen > length ( seq ) | maxIndelTandem > winLen | maxIndelCryptic > winLen ) {
+    if ( winLen > length ( seq ) | maxIndelTandem >= winLen | maxIndelCryptic >= winLen ) {
         std::cerr << "Input-parameters are not allowed." << std::endl;
         return 0;
     }
     
-    TGraph gbaGraph = fastCreateVertices ( seq, winLen, maxIndelTandem, maxIndelCryptic, vertex, vertexArray );
+    TGraph gbaGraph = fastCreateVertices ( seq, winLen, maxIndelTandem, maxIndelCryptic, vertex, vertexArray, originalImp );
     gbaGraph = createEdges ( gbaGraph, vertexArray, seq );
-    //printVertexArray ( vertexArray );
+    String<int> longPathVertices = getLongestPathsPerSubgraph(gbaGraph);
     
-    String<int> longPathVertices = getLongestPaths ( gbaGraph );
-
-    int rows = 27;
-    int columns = 27;
-
-    String<int> wholeSeqFrequencies = initFreqVector();
-
-    
-    getAminoAcidCountInSequence(wholeSeqFrequencies, seq);
-
     String<String<int> > lcrBlocks = generateLCRBlocks (longPathVertices, vertexArray);
-    
-    
     String<String<int> > extendedBlocks = processBlocks(lcrBlocks, seq);
-
-    
     String<String<int> > mergedBlocks = mergeRegions(extendedBlocks);
     
     String<String<int> > filteredRegions = filter(mergedBlocks, seq);
     filteredRegions = filter(filteredRegions, seq);
     filteredRegions = mergeRegions(filteredRegions);
-    
     
     std::cout << "low complexity regions found at: " << std::endl;
     
@@ -2034,9 +2104,7 @@ int gba (String<AminoAcid> const & seq, int const winLen, int const maxIndelTand
         std::cout << filteredRegions[i][0] << " - " << filteredRegions[i][1] << std::endl;;
     }
     
-    return 1;
-    
-    
+    return filteredRegions;
 }
  
 struct Options
@@ -2049,6 +2117,7 @@ struct Options
     float hicut;
     int maxIndelTandem;
     int maxIndelCryptic;
+    int originalImp;
 };
  
 
@@ -2074,6 +2143,8 @@ seqan::ArgumentParser::ParseResult parseCommandLine(Options & options, int argc,
     setDefaultValue(parser, "indelTandemRepeats", 3);
     addOption(parser, seqan::ArgParseOption("cr", "indelCrypticRepeats", "Parameter to specify the maximum distance between letters in cryptic repeats for GBA.", seqan::ArgParseArgument::INTEGER, "INT"));
     setDefaultValue(parser, "indelCrypticRepeats", 5);
+    addOption(parser, seqan::ArgParseOption("oi", "originalImp", "Choose whether you want to use the original Implementation of creating Vertices or the modified version.", seqan::ArgParseArgument::INTEGER, "INT"));
+    setDefaultValue(parser, "originalImp", 1);
     
     
     seqan::ArgumentParser::ParseResult res = seqan::parse(parser, argc, argv);
@@ -2090,11 +2161,12 @@ seqan::ArgumentParser::ParseResult parseCommandLine(Options & options, int argc,
     getOptionValue(options.hicut, parser, "hicut");
     getOptionValue(options.maxIndelTandem, parser, "indelTandemRepeats");
     getOptionValue(options.maxIndelCryptic, parser, "indelCrypticRepeats");
+    getOptionValue(options.originalImp, parser, "originalImp");
     
     return seqan::ArgumentParser::PARSE_OK;
 }  
   
-
+  
 int main ( int argc, char const ** argv )
 {
     
@@ -2122,28 +2194,32 @@ int main ( int argc, char const ** argv )
     float hiCut = options.hicut;
     int maxIndelTandem = options.maxIndelTandem;
     int maxIndelCryptic = options.maxIndelCryptic;
+    int  originalImp = options.originalImp;
     
     
-    computeTwoLetterScoringMatrix(twoLetterScoringMatrix, twoGramAlphabet);
-    normalizeScoringMatrix(twoLetterScoringMatrix);
     
+    
+      
     if (alg == "gba" or alg == "GBA") {
-        readSeqFromFastaFile ( fileIn, seqSet, seqIds );
+        if (readSeqFromFastaFile ( fileIn, seqSet, seqIds )) {
+            return 1;
+        }
         std::cout << "------------------------------- executing GBA... -----------------------------" << std::endl;
+        computeTwoLetterScoringMatrix(twoLetterScoringMatrix, twoGramAlphabet);
+
+        normalizeScoringMatrix(twoLetterScoringMatrix);
         SEQAN_OMP_PRAGMA (parallel for)
         for (unsigned i = 0; i < length(seqSet); ++i) { 
             String<AminoAcid> seq = seqSet[i];
-            
-            gba(seq, windowLength, maxIndelTandem, maxIndelCryptic);
+            segs = gba(seq, windowLength, maxIndelTandem, maxIndelCryptic, originalImp);
             appendValue (segments, segs);
-            /*
-            std::cout << "1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0" << std::endl;
-            printSeqAnString(seqPaper);
-            */
+            
         }
         
     } else if (alg == "seg" or alg == "SEG") {
-        readSeqFromFastaFile ( fileIn, seqSet, seqIds );
+        if (readSeqFromFastaFile ( fileIn, seqSet, seqIds )) {
+            return 1;
+        }
         std::cout << "------------------------------- executing SEG... -----------------------------" << std::endl;
         SEQAN_OMP_PRAGMA (parallel for)
         for (unsigned i = 0; i < length(seqSet); ++i) {
@@ -2156,29 +2232,8 @@ int main ( int argc, char const ** argv )
         std::cout << "Please specify whether you want to run 'gba' or 'seg'" << std::endl;
         return 1;
     }
-    
+
     writeRegsIntoFile(segments, seqIds, fileOut);
-
-    
-    
-    
-    
-    //high_resolution_clock::time_point t1 = high_resolution_clock::now();
-    //do stuff
-    //high_resolution_clock::time_point t2 = high_resolution_clock::now();
-
-    //std::cout << "gemessene Dauer mit functuon: " << funcTime(createVertices, seq, winLen, maxIndelTandem, maxIndelCryptic) << std::endl;
-
-    
-   //for (unsigned i = 0; i < length(extendedBlocks); ++i) {       
-       //maskSequence(seq, extendedBlocks[i][0], extendedBlocks[i][1]);
-   //}
-   
-
-    String<AminoAcid> bla = "GDFBL";
-    String<AminoAcid> blaInfix = infix(bla, 2, 4);
-    std::cout << blaInfix << std::endl;
-    
-    
+      
     return 0;
 }
